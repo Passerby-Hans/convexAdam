@@ -112,11 +112,14 @@ def main():
     mean_dice = np.nanmean([dice_tbl[v] for v in ORGANS])
     print(f"\nmean Dice (organs present): {mean_dice:.3f}")
 
+    labs = sorted(ORGANS)
+    names = [ORGANS[v] for v in labs]
     save_label_png(
         t2_img_r, t2_lab, warped_lab, overlap,
         RUNS / "label_transfer_t1_to_t2.png",
         dice_tbl,
         f"T1DUAL_InPhase -> T2SPIR label transfer (case 1)  mean Dice={mean_dice:.3f}",
+        labels=labs, names=names,
     )
     print(f"-> {RUNS / 'label_transfer_t1_to_t2.png'}")
 
@@ -127,15 +130,16 @@ def main():
     t1r_img, t1r_lab = raw("T1DUAL_InPhase")
     t2r_img, t2r_lab = raw("T2SPIR")
     save_montage(t1r_img, t1r_lab, RUNS / "montage_T1DUAL_InPhase.png",
-                 "T1DUAL_InPhase (case 1) - all axial slices + organ labels")
+                 "T1DUAL_InPhase (case 1) - all axial slices + organ labels", labels=labs)
     save_montage(t2r_img, t2r_lab, RUNS / "montage_T2SPIR.png",
-                 "T2SPIR (case 1) - all axial slices + organ labels")
+                 "T2SPIR (case 1) - all axial slices + organ labels", labels=labs)
     print(f"-> {RUNS / 'montage_T1DUAL_InPhase.png'}")
     print(f"-> {RUNS / 'montage_T2SPIR.png'}")
     save_warped_montage(
         t2_img_r, t2_lab, warped_img, warped_lab, overlap,
         RUNS / "montage_warped_t1_to_t2.png",
         f"T1->T2 warped vs T2, per organ slice (case 1)  mean Dice={mean_dice:.3f}",
+        labels=labs,
     )
     print(f"-> {RUNS / 'montage_warped_t1_to_t2.png'}")
 
