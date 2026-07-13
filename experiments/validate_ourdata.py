@@ -123,7 +123,8 @@ def main():
                    labels=labs, names=names)
     save_warped_montage(t2_img_r, t2_seg, warped_img, warped_seg, overlap,
                         RUNS / "ourdata_montage_pdff_to_t2.png",
-                        f"PDFF->T2 warped vs T2 per slice (BLA_0096_1)", labels=labs)
+                        f"PDFF->T2 warped vs T2 per slice (BLA_0096_1)", labels=labs,
+                        pre_img=mov_r, pre_lab=seg_arr.astype(np.uint8))
     # per-modality raw montages (reoriented to RAS)
     t2r_img, _ = load_ras("abdomen_ax_T2.nii.gz")
     t2r_seg = np.asarray(nib.as_closest_canonical(nib.load(str(DATA / "T2/abdomen_ax_T2_seg.nii.gz"))).dataobj)

@@ -139,7 +139,7 @@ def main():
         t2_img_r, t2_lab, warped_img, warped_lab, overlap,
         RUNS / "montage_warped_t1_to_t2.png",
         f"T1->T2 warped vs T2, per organ slice (case 1)  mean Dice={mean_dice:.3f}",
-        labels=labs,
+        labels=labs, pre_img=moving_r, pre_lab=lab_arr.astype(np.uint8),
     )
     print(f"-> {RUNS / 'montage_warped_t1_to_t2.png'}")
 

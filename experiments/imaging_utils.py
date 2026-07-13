@@ -356,10 +356,12 @@ def save_montage(img, lab, out_png, title, labels, cols=7):
 
 
 def save_warped_montage(t2_img, t2_lab, warped_img, warped_lab, overlap, out_png,
-                        title, labels, max_slices=36):
-    """Per organ-bearing z-slice (subsampled to <=max_slices), three panels:
-    [fixed img + true label | warped img + warped label | agreement map].
-    agreement: green = same label both, red = one-sided. All in fixed frame (RAS)."""
+                        title, labels, pre_img=None, pre_lab=None, max_slices=36):
+    """Per organ-bearing z-slice (subsampled), columns:
+       [fixed img + true label] [+ pre-warp moving + label] [warped moving + label]
+       [agreement map].
+    pre_img/pre_lab (moving in fixed frame, BEFORE the disp warp) optional -> adds
+    a "before registration" column. agreement: green=same label, red=one-sided."""
     import matplotlib
     matplotlib.use("Agg")
     import matplotlib.pyplot as plt
@@ -368,6 +370,8 @@ def save_warped_montage(t2_img, t2_lab, warped_img, warped_lab, overlap, out_png
     cmap = _label_cmap(len(labels))
     agree_cmap = ListedColormap([(0, 0, 0, 0), (0.2, 0.9, 0.2, 0.6), (1, 0.2, 0.2, 0.6)])
     vmax = len(labels)
+    has_pre = pre_img is not None
+    ncol = 4 if has_pre else 3
 
     def norm(x):
         return (x - x.min()) / (x.max() - x.min() + 1e-8)
@@ -380,22 +384,33 @@ def save_warped_montage(t2_img, t2_lab, warped_img, warped_lab, overlap, out_png
     zs = organz[::step]
 
     rows = len(zs)
-    fig, axs = plt.subplots(rows, 3, figsize=(9.5, rows * 2.05), squeeze=False)
+    fig, axs = plt.subplots(rows, ncol, figsize=(3.2 * ncol, rows * 2.05), squeeze=False)
     for r, z in enumerate(zs):
         ts = _remap_labels(t2_lab[:, :, z], labels)
         ps = _remap_labels(warped_lab[:, :, z], labels)
-        ax = axs[r, 0]
+        col = 0
+        # fixed
+        ax = axs[r, col]; col += 1
         ax.imshow(norm(t2_img[:, :, z]).T, cmap="gray", origin="lower", aspect="equal")
         ax.imshow(ts.T, cmap=cmap, vmin=0, vmax=vmax, origin="lower", aspect="equal", interpolation="nearest")
-        ax.set_title("fixed img + true label", fontsize=8)
-        ax = axs[r, 1]
+        ax.set_title("fixed (target) + label", fontsize=8)
+        # pre-warp moving (before registration)
+        if has_pre:
+            ax = axs[r, col]; col += 1
+            qs = _remap_labels(pre_lab[:, :, z], labels)
+            ax.imshow(norm(pre_img[:, :, z]).T, cmap="gray", origin="lower", aspect="equal")
+            ax.imshow(qs.T, cmap=cmap, vmin=0, vmax=vmax, origin="lower", aspect="equal", interpolation="nearest")
+            ax.set_title("moving BEFORE warp + label", fontsize=8)
+        # warped moving (after registration)
+        ax = axs[r, col]; col += 1
         ax.imshow(norm(warped_img[:, :, z]).T, cmap="gray", origin="lower", aspect="equal")
         ax.imshow(ps.T, cmap=cmap, vmin=0, vmax=vmax, origin="lower", aspect="equal", interpolation="nearest")
-        ax.set_title("warped (moving) + label", fontsize=8)
+        ax.set_title("moving AFTER warp + label", fontsize=8)
+        # agreement
         agree = np.zeros(ts.shape, int)
         agree[(ts > 0) & (ps > 0) & (ts == ps)] = 1
         agree[((ts > 0) | (ps > 0)) & ~((ts > 0) & (ps > 0) & (ts == ps))] = 2
-        ax = axs[r, 2]
+        ax = axs[r, col]
         ax.imshow(norm(t2_img[:, :, z]).T, cmap="gray", origin="lower", aspect="equal")
         ax.imshow(agree.T, cmap=agree_cmap, vmin=0, vmax=2, origin="lower", aspect="equal", interpolation="nearest")
         ax.set_title(f"z={z}  green=agree red=mismatch", fontsize=8)
