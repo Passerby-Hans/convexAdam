@@ -55,24 +55,27 @@ def spacing_of(affine):
     return np.sqrt((affine[:3, :3] ** 2).sum(axis=0))
 
 
-def resample_iso(arr, affine, target_spacing):
-    """Trilinear resample to (near-)isotropic spacing. Returns (arr, affine)."""
+def resample_iso(arr, affine, target_spacing, order=1):
+    """Resample to (near-)isotropic spacing (order=1 linear for images, 0 NN for
+    labels). Returns (arr, affine) with affine columns rescaled."""
     cur = spacing_of(affine)
     factors = cur / np.array(target_spacing, float)
-    out = zoom(arr.astype(np.float32), factors, order=1, mode="nearest")
+    out = zoom(arr.astype(np.float32), factors, order=order, mode="nearest")
     aff = affine.copy()
     aff[:3, :3] = affine[:3, :3] * (np.array(target_spacing, float) / cur)[None, :]
     return out, aff
 
 
-def crop_or_pad(arr, target_shape, affine):
-    """Center crop or constant(pad with min) to target_shape; shifts origin."""
+def crop_or_pad(arr, target_shape, affine, pad_value=None):
+    """Center crop or constant-pad to target_shape; shifts origin for crops.
+    pad_value defaults to arr.min() (use 0 for labels)."""
+    if pad_value is None:
+        pad_value = float(arr.min())
     target = np.array(target_shape, int)
-    cur = np.array(arr.shape, int)
     out = arr
     aff = affine.copy()
-    for ax in range(3):
-        d = cur[ax] - target[ax]
+    for ax in range(min(3, len(target))):
+        d = out.shape[ax] - target[ax]
         if d > 0:
             start = d // 2
             out = np.take(out, range(start, start + target[ax]), axis=ax)
@@ -81,14 +84,10 @@ def crop_or_pad(arr, target_shape, affine):
         elif d < 0:
             before = (-d) // 2
             after = (-d) - before
-            pad = [(0, 0)] * 3
+            pad = [(0, 0)] * out.ndim
             pad[ax] = (before, after)
-            out = np.pad(out, pad, mode="constant", constant_values=float(arr.min()))
-            # padding doesn't move the origin of existing voxels, but the new
-            # volume's logical origin shifts: subtract before*axis_vec so that
-            # the first real voxel keeps its physical position.
+            out = np.pad(out, pad, mode="constant", constant_values=pad_value)
             aff[:3, 3] -= aff[:3, ax] * before
-        cur = np.array(out.shape, int)
     return out, aff
 
 
@@ -225,5 +224,89 @@ def save_comparison_png(fixed, moving, warped, out_png, title, slice_idx=None):
             ax.tick_params(labelsize=7)
     fig.suptitle(title, fontsize=11)
     fig.tight_layout(rect=(0, 0, 1, 0.96))
+    fig.savefig(out_png, dpi=110, bbox_inches="tight")
+    plt.close(fig)
+
+
+# ---------------------------------------------------------------------------
+# label transfer: warp by ConvexAdam disp + per-organ Dice + label overlay
+# ---------------------------------------------------------------------------
+
+ORGANS = {63: "liver", 126: "spleen", 189: "R-kidney", 252: "L-kidney"}
+
+
+def warp_ras_with_disp(arr_ras, disp_zyx, order=0):
+    """Apply ConvexAdam backward displacement field (disp in (Z,Y,X,3)) to a RAS
+    array (X,Y,Z). order=0 for discrete labels/FOV masks, 1 for images. Voxels
+    sampled outside the source are 0 (so a ones-mask -> exact FOV coverage)."""
+    from scipy.ndimage import map_coordinates
+    arr_zyx = np.ascontiguousarray(arr_ras.transpose(2, 1, 0))
+    d1, d2, d3, _ = disp_zyx.shape
+    ident = np.meshgrid(np.arange(d1), np.arange(d2), np.arange(d3), indexing="ij")
+    warped = map_coordinates(arr_zyx, disp_zyx.transpose(3, 0, 1, 2) + ident,
+                             order=order, mode="constant", cval=0.0)
+    return warped.transpose(2, 1, 0)
+
+
+def dice_label(a, b, val, mask=None):
+    """Dice for a single label value, optionally restricted to a boolean mask
+    (e.g. the FOV-overlap region)."""
+    if mask is not None:
+        a = a[mask]
+        b = b[mask]
+    A = (a == val)
+    B = (b == val)
+    s = A.sum() + B.sum()
+    return float(2.0 * (A & B).sum() / s) if s > 0 else float("nan")
+
+
+def save_label_png(img, lab_true, lab_pred, overlap, out_png, dice_tbl, title):
+    """Label-transfer figure (RAS arrays). axial slice = largest overlap area.
+    Panels: T2 img + true labels | T2 img + warped-T1 labels | agreement map."""
+    import matplotlib
+    matplotlib.use("Agg")
+    import matplotlib.pyplot as plt
+    from matplotlib.colors import ListedColormap
+
+    cmap = ListedColormap([(0, 0, 0, 0), (1, 0.2, 0.2, 0.6), (0.2, 0.9, 0.2, 0.6),
+                           (0.2, 0.4, 1, 0.6), (0.95, 0.85, 0.2, 0.6)])  # bg,liver,spleen,RK,LK
+    remap = {0: 0, 63: 1, 126: 2, 189: 3, 252: 4}
+
+    def remap_arr(a):
+        out = np.zeros(a.shape, np.uint8)
+        for v, k in remap.items():
+            out[a == v] = k
+        return out
+
+    z = int(np.argmax(overlap.sum(axis=(0, 1)))) if overlap.any() else img.shape[2] // 2
+
+    def norm(x):
+        return (x - x.min()) / (x.max() - x.min() + 1e-8)
+
+    img_s = norm(img[:, :, z])
+    true_s = remap_arr(lab_true[:, :, z])
+    pred_s = remap_arr(lab_pred[:, :, z])
+
+    fig, axs = plt.subplots(1, 3, figsize=(16, 6))
+    for ax, ls, name in [(axs[0], true_s, "T2 ground-truth label"),
+                         (axs[1], pred_s, "warped T1 label (after reg)")]:
+        ax.imshow(img_s.T, cmap="gray", origin="lower", aspect="equal")
+        ax.imshow(ls.T, cmap=cmap, vmin=0, vmax=4, origin="lower",
+                  aspect="equal", interpolation="nearest")
+        ax.set_title(name, fontsize=10)
+        ax.axis("off")
+    agree = np.zeros(true_s.shape, int)
+    agree[(true_s > 0) & (pred_s > 0) & (true_s == pred_s)] = 1   # both, same organ
+    agree[((true_s > 0) | (pred_s > 0)) & ~((true_s > 0) & (pred_s > 0) & (true_s == pred_s))] = 2
+    axs[2].imshow(img_s.T, cmap="gray", origin="lower", aspect="equal")
+    axs[2].imshow(agree.T, cmap=ListedColormap([(0, 0, 0, 0), (0.2, 0.9, 0.2, 0.6), (1, 0.2, 0.2, 0.6)]),
+                  vmin=0, vmax=2, origin="lower", aspect="equal", interpolation="nearest")
+    axs[2].set_title("green=agree  red=mismatch", fontsize=10)
+    axs[2].axis("off")
+
+    vals = sorted(ORGANS)
+    dice_str = "  ".join(f"{ORGANS[v]}={dice_tbl[v]:.2f}" for v in vals)
+    fig.suptitle(f"{title}\naxial z={z}  |  Dice (on FOV overlap): {dice_str}", fontsize=10)
+    fig.tight_layout(rect=(0, 0, 1, 0.93))
     fig.savefig(out_png, dpi=110, bbox_inches="tight")
     plt.close(fig)

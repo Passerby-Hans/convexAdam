@@ -47,8 +47,25 @@ def _scalar(ds, name, default=None):
     return float(v) if v is not None else default
 
 
-def load_series(dcm_dir: Path):
-    """Read all DICOMs in a directory, return (volume[R,C,S], affine4x4)."""
+def load_labels(datasets, ground_dir: Path):
+    """Stack label PNGs matched to each DICOM by filename stem, in the same sorted
+    slice order. Returns uint8 (R,C,S) volume, or None if unavailable/mismatched."""
+    if ground_dir is None or not ground_dir.exists():
+        return None
+    from PIL import Image
+    labels = []
+    for ds in datasets:
+        stem = Path(ds.filename).stem
+        png = ground_dir / f"{stem}.png"
+        if not png.exists():
+            return None
+        labels.append(np.array(Image.open(png)).astype(np.uint8))
+    return np.stack(labels, axis=-1)
+
+
+def load_series(dcm_dir: Path, ground_dir: Path = None):
+    """Read all DICOMs in a directory; return (volume[R,C,S], affine4x4, labels|None).
+    labels is stacked in the SAME sorted slice order (or None if no matching PNGs)."""
     files = sorted(dcm_dir.glob("*.dcm"))
     if not files:
         return None
@@ -92,17 +109,20 @@ def load_series(dcm_dir: Path):
     affine[:3, 2] = slice_dir * zs
     affine[:3, 3] = first_ipp
 
-    return volume, affine
+    labels = load_labels(datasets, ground_dir)
+    return volume, affine, labels
 
 
 def to_ras(volume, affine):
-    """Reorient (volume, affine) to canonical RAS via nibabel orientation transform."""
+    """Reorient (volume, affine) to canonical RAS via nibabel orientation transform.
+    Uses apply_orientation (pure axis permutation/flip, no interpolation) -> safe for
+    both intensities and discrete labels; input dtype is preserved."""
     ornt = io_orientation(affine)
     ras = axcodes2ornt("RAS")
     transform = ornt_transform(ornt, ras)
     vol_ras = apply_orientation(volume, transform)
     aff_ras = affine @ inv_ornt_aff(transform, volume.shape)
-    return vol_ras.astype(np.float32), aff_ras
+    return vol_ras, aff_ras
 
 
 def process_case(case_id, split):
@@ -115,28 +135,33 @@ def process_case(case_id, split):
 
     plan = []
     t1 = base / "T1DUAL" / "DICOM_anon"
+    t1_ground = base / "T1DUAL" / "Ground"
     if t1.exists():
         for ph in ("InPhase", "OutPhase"):
             d = t1 / ph
             if d.exists():
-                plan.append((d, f"T1DUAL_{ph}"))
+                plan.append((d, f"T1DUAL_{ph}", t1_ground))
     t2 = base / "T2SPIR" / "DICOM_anon"
     if t2.exists() and list(t2.glob("*.dcm")):
-        plan.append((t2, "T2SPIR"))
+        plan.append((t2, "T2SPIR", base / "T2SPIR" / "Ground"))
 
-    for dcm_dir, name in plan:
-        result = load_series(dcm_dir)
+    for dcm_dir, name, ground_dir in plan:
+        result = load_series(dcm_dir, ground_dir)
         if result is None:
             print(f"  SKIP {name}: no DICOM in {dcm_dir}")
             continue
-        volume, affine = result
-        vol_ras, aff_ras = to_ras(volume, affine)
-        nii = nib.Nifti1Image(vol_ras, aff_ras)
-        nib.save(nii, out_dir / f"{name}.nii.gz")
-        ax = nib.aff2axcodes(aff_ras)
-        print(f"  {name:18s} shape={vol_ras.shape} "
-              f"zooms={tuple(round(z,3) for z in nii.header.get_zooms())} "
-              f"orient={ax} -> {out_dir.name}/{name}.nii.gz")
+        volume, affine, labels = result
+        vol_ras, aff_ras = to_ras(volume.astype(np.float32), affine)
+        nib.save(nib.Nifti1Image(vol_ras, aff_ras), out_dir / f"{name}.nii.gz")
+        zooms = tuple(round(z, 3) for z in
+                      np.sqrt((aff_ras[:3, :3] ** 2).sum(axis=0)))
+        extra = ""
+        if labels is not None:
+            lab_ras, _ = to_ras(labels, affine)
+            nib.save(nib.Nifti1Image(lab_ras, aff_ras), out_dir / f"{name}_label.nii.gz")
+            extra = f" +label"
+        print(f"  {name:18s} shape={vol_ras.shape}{extra} zooms={zooms} "
+              f"orient={nib.aff2axcodes(aff_ras)} -> {out_dir.name}/{name}.nii.gz")
     return True
 
 

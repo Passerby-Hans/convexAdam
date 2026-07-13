@@ -76,7 +76,24 @@ PYTHONPATH=experiments python experiments/validate_chaos.py
 case 1 结果（2mm iso, crop 160×160×110, RTX 4090）：
 - 1a identity：NCC=0.999（管线正确）
 - 1b 形变恢复（|phi|~4vx）：**NCC 0.933 → 0.989**（ROI 0.928 → 0.997），nMSE 降 6×
-- 2 T1→T2 跨模态：NCC 基本不变（0.458→0.439）——**原始强度 NCC 是弱指标**，公正评价需 CHAOS 器官标签 Dice（后续）
+- 2 T1→T2 跨模态：NCC 基本不变（0.458→0.439）——**原始强度 NCC 是弱指标**，公正评价用下面的标签 Dice
+
+### 标签迁移验证（`validate_labels.py`，跨模态公正指标）
+
+```bash
+PYTHONPATH=experiments python experiments/validate_labels.py
+```
+
+流程：T1→T2 图像配准（ConvexAdam/MIND）→ 用位移场把 T1 器官标注 NN-warp 到 T2 空间 → **只在 FOV 重叠区**（T1 实际覆盖、映射进 T2 帧的部分，83.7%）算分器官 Dice。
+转换器 `convert_chaos.py` 现在同时输出 `{series}_label.nii.gz`（与图像同 affine；标注 PNG 按文件名 stem 与 DICOM 一一匹配，标签值 0/63/126/189/252 = 背景/肝/脾/右肾/左肾）。
+
+case 1 结果（mean Dice **0.914**，与选型报告"CHAOS 跨模态 0.85–0.88"相当或更好）：
+| 器官 | Dice |
+|---|---|
+| 肝 | 0.928 |
+| 脾 | 0.920 |
+| 右肾 | 0.926 |
+| 左肾 | 0.883 |
 
 图输出在 `experiments/runs/`（已 gitignore，脚本可复现）。
 
