@@ -139,3 +139,7 @@ tests/output/*
 !tests/output/.gitkeep
 tests/input/P-65591573/
 tests/output-expected/P-65591573/
+
+# our experiment data (converted from CHAOS raw, large)
+chaos_data/
+experiments/runs/
