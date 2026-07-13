@@ -27,6 +27,7 @@ sys.path.insert(0, str(Path(__file__).resolve().parent))
 from imaging_utils import (  # noqa: E402
     nib_to_sitk, sitk_to_nib, resample_iso, crop_or_pad,
     warp_ras_with_disp, dice_label, ORGANS, save_label_png,
+    save_montage, save_warped_montage,
 )
 from convexAdam.convex_adam_MIND import convex_adam_pt  # noqa: E402
 
@@ -94,6 +95,8 @@ def main():
 
     # fixed-frame arrays
     t2_img_r, _ = sitk_to_nib(fixed_sitk)
+    moving_r, _ = sitk_to_nib(moving_sitk)
+    warped_img = warp_ras_with_disp(moving_r, disp, order=1)  # warped T1 image (t2wrap)
 
     # 4) per-organ Dice on the FOV overlap
     print(f"\nFOV overlap: {int(overlap.sum())} voxels ({100 * overlap.mean():.1f}% of T2 frame)")
@@ -116,6 +119,25 @@ def main():
         f"T1DUAL_InPhase -> T2SPIR label transfer (case 1)  mean Dice={mean_dice:.3f}",
     )
     print(f"-> {RUNS / 'label_transfer_t1_to_t2.png'}")
+
+    # full-volume montages: T1 original, T2 original, warped-T1 vs T2 per slice
+    def raw(s):
+        return (np.asarray(nib.load(str(DATA / f"{s}.nii.gz")).dataobj, np.float32),
+                np.asarray(nib.load(str(DATA / f"{s}_label.nii.gz")).dataobj))
+    t1r_img, t1r_lab = raw("T1DUAL_InPhase")
+    t2r_img, t2r_lab = raw("T2SPIR")
+    save_montage(t1r_img, t1r_lab, RUNS / "montage_T1DUAL_InPhase.png",
+                 "T1DUAL_InPhase (case 1) - all axial slices + organ labels")
+    save_montage(t2r_img, t2r_lab, RUNS / "montage_T2SPIR.png",
+                 "T2SPIR (case 1) - all axial slices + organ labels")
+    print(f"-> {RUNS / 'montage_T1DUAL_InPhase.png'}")
+    print(f"-> {RUNS / 'montage_T2SPIR.png'}")
+    save_warped_montage(
+        t2_img_r, t2_lab, warped_img, warped_lab, overlap,
+        RUNS / "montage_warped_t1_to_t2.png",
+        f"T1->T2 warped vs T2, per organ slice (case 1)  mean Dice={mean_dice:.3f}",
+    )
+    print(f"-> {RUNS / 'montage_warped_t1_to_t2.png'}")
 
 
 if __name__ == "__main__":

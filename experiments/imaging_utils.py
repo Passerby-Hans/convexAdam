@@ -278,7 +278,8 @@ def save_label_png(img, lab_true, lab_pred, overlap, out_png, dice_tbl, title):
             out[a == v] = k
         return out
 
-    z = int(np.argmax(overlap.sum(axis=(0, 1)))) if overlap.any() else img.shape[2] // 2
+    z = int(np.argmax(((lab_true > 0) & overlap).sum(axis=(0, 1)))) \
+        if ((lab_true > 0) & overlap).any() else img.shape[2] // 2
 
     def norm(x):
         return (x - x.min()) / (x.max() - x.min() + 1e-8)
@@ -309,4 +310,105 @@ def save_label_png(img, lab_true, lab_pred, overlap, out_png, dice_tbl, title):
     fig.suptitle(f"{title}\naxial z={z}  |  Dice (on FOV overlap): {dice_str}", fontsize=10)
     fig.tight_layout(rect=(0, 0, 1, 0.93))
     fig.savefig(out_png, dpi=110, bbox_inches="tight")
+    plt.close(fig)
+
+
+def _label_cmap():
+    from matplotlib.colors import ListedColormap
+    return ListedColormap([(0, 0, 0, 0), (1, 0.2, 0.2, 0.55), (0.2, 0.9, 0.2, 0.55),
+                           (0.2, 0.4, 1, 0.55), (0.95, 0.85, 0.2, 0.55)])  # bg,liver,spleen,RK,LK
+
+
+def _remap_labels(a):
+    remap = {0: 0, 63: 1, 126: 2, 189: 3, 252: 4}
+    out = np.zeros(a.shape, np.uint8)
+    for v, k in remap.items():
+        out[a == v] = k
+    return out
+
+
+def save_montage(img, lab, out_png, title, cols=7):
+    """Tile ALL axial (z) slices into a grid; each cell = image (gray) + organ
+    labels (colour overlay). RAS arrays (X,Y,Z); z = SI = head-foot."""
+    import matplotlib
+    matplotlib.use("Agg")
+    import matplotlib.pyplot as plt
+
+    def norm(x):
+        return (x - x.min()) / (x.max() - x.min() + 1e-8)
+
+    Z = img.shape[2]
+    rows = (Z + cols - 1) // cols
+    fig, axs = plt.subplots(rows, cols, figsize=(cols * 2.1, rows * 2.1))
+    axs = np.atleast_1d(axs).ravel()
+    cmap = _label_cmap()
+    for z in range(Z):
+        ax = axs[z]
+        ax.imshow(norm(img[:, :, z]).T, cmap="gray", origin="lower", aspect="equal")
+        ax.imshow(_remap_labels(lab[:, :, z]).T, cmap=cmap, vmin=0, vmax=4,
+                  origin="lower", aspect="equal", interpolation="nearest")
+        ax.set_title(f"z={z}", fontsize=7)
+        ax.set_xticks([])
+        ax.set_yticks([])
+    for z in range(Z, len(axs)):
+        axs[z].axis("off")
+    fig.suptitle(f"{title}  ({Z} axial slices; red=liver green=spleen blue=R-kidney yellow=L-kidney)",
+                 fontsize=10)
+    fig.tight_layout(rect=(0, 0, 1, 0.97))
+    fig.savefig(out_png, dpi=90, bbox_inches="tight")
+    plt.close(fig)
+
+
+def save_warped_montage(t2_img, t2_lab, warped_img, warped_lab, overlap, out_png,
+                        title, max_slices=36):
+    """Per organ-bearing z-slice (subsampled to <=max_slices), three panels:
+    [T2 img + T2 label | warped-T1 img + warped label | agreement map].
+    agreement: green = same organ both, red = one-sided. All in T2's frame (RAS)."""
+    import matplotlib
+    matplotlib.use("Agg")
+    import matplotlib.pyplot as plt
+    from matplotlib.colors import ListedColormap
+
+    cmap = _label_cmap()
+    agree_cmap = ListedColormap([(0, 0, 0, 0), (0.2, 0.9, 0.2, 0.6), (1, 0.2, 0.2, 0.6)])
+
+    def norm(x):
+        return (x - x.min()) / (x.max() - x.min() + 1e-8)
+
+    organz = [z for z in range(t2_img.shape[2])
+              if ((t2_lab[:, :, z] > 0) & overlap[:, :, z]).any()]
+    if not organz:
+        organz = [t2_img.shape[2] // 2]
+    step = max(1, (len(organz) + max_slices - 1) // max_slices)
+    zs = organz[::step]
+
+    rows = len(zs)
+    fig, axs = plt.subplots(rows, 3, figsize=(9.5, rows * 2.05), squeeze=False)
+    for r, z in enumerate(zs):
+        ts = _remap_labels(t2_lab[:, :, z])
+        ps = _remap_labels(warped_lab[:, :, z])
+        # col 0: T2 + T2 label
+        ax = axs[r, 0]
+        ax.imshow(norm(t2_img[:, :, z]).T, cmap="gray", origin="lower", aspect="equal")
+        ax.imshow(ts.T, cmap=cmap, vmin=0, vmax=4, origin="lower", aspect="equal", interpolation="nearest")
+        ax.set_title("T2 img + T2 label", fontsize=8)
+        # col 1: warped-T1 + warped label
+        ax = axs[r, 1]
+        ax.imshow(norm(warped_img[:, :, z]).T, cmap="gray", origin="lower", aspect="equal")
+        ax.imshow(ps.T, cmap=cmap, vmin=0, vmax=4, origin="lower", aspect="equal", interpolation="nearest")
+        ax.set_title("warped-T1 (t2wrap) + label", fontsize=8)
+        # col 2: agreement
+        agree = np.zeros(ts.shape, int)
+        agree[(ts > 0) & (ps > 0) & (ts == ps)] = 1
+        agree[((ts > 0) | (ps > 0)) & ~((ts > 0) & (ps > 0) & (ts == ps))] = 2
+        ax = axs[r, 2]
+        ax.imshow(norm(t2_img[:, :, z]).T, cmap="gray", origin="lower", aspect="equal")
+        ax.imshow(agree.T, cmap=agree_cmap, vmin=0, vmax=2, origin="lower", aspect="equal", interpolation="nearest")
+        ax.set_title(f"z={z}  green=agree red=mismatch", fontsize=8)
+        for ax in axs[r]:
+            ax.set_xticks([])
+            ax.set_yticks([])
+    fig.suptitle(title, fontsize=10)
+    fig.tight_layout(rect=(0, 0, 1, 0.98))
+    fig.savefig(out_png, dpi=90, bbox_inches="tight")
     plt.close(fig)
