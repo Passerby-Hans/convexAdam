@@ -421,3 +421,40 @@ def save_warped_montage(t2_img, t2_lab, warped_img, warped_lab, overlap, out_png
     fig.tight_layout(rect=(0, 0, 1, 0.98))
     fig.savefig(out_png, dpi=90, bbox_inches="tight")
     plt.close(fig)
+
+
+def save_all_slices_compare(vol_a, vol_b, out_png, title_a, title_b, super_title, cols=8):
+    """ALL axial slices of two volumes on ONE figure (convention: show every slice).
+    Top band = every axial slice of vol_a (e.g. LR original), bottom band = vol_b
+    (e.g. SR result). RAS/nibabel arrays (X,Y,Z); z = each axial slice. Each tile
+    min-max normalized independently and labelled with its slice index."""
+    import matplotlib
+    matplotlib.use("Agg")
+    import matplotlib.pyplot as plt
+    from matplotlib.gridspec import GridSpec
+
+    def nm(x):
+        return (x - x.min()) / (x.max() - x.min() + 1e-8)
+
+    na, nb = int(vol_a.shape[2]), int(vol_b.shape[2])
+    ra, rb = int(np.ceil(na / cols)), int(np.ceil(nb / cols))
+    rows = ra + rb
+    fig = plt.figure(figsize=(cols * 1.9, rows * 1.9 + 0.8))
+    gs = GridSpec(rows, cols, figure=fig, hspace=0.4, wspace=0.08)
+
+    def draw(vol, n, r0, tag):
+        for i in range(int(np.ceil(n / cols)) * cols):
+            r, c = divmod(i, cols)
+            ax = fig.add_subplot(gs[r0 + r, c])
+            if i < n:
+                ax.imshow(nm(vol[:, :, i]).T, cmap="gray", origin="lower", aspect="auto")
+                ax.set_title(f"{tag} z{i}", fontsize=6)
+            ax.set_xticks([])
+            ax.set_yticks([])
+
+    draw(vol_a, na, 0, "A")
+    draw(vol_b, nb, ra, "B")
+    fig.suptitle(f"{super_title}\nA: {title_a} ({na} sl)   |   B: {title_b} ({nb} sl)",
+                 fontsize=11)
+    fig.savefig(out_png, dpi=90, bbox_inches="tight")
+    plt.close(fig)
