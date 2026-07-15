@@ -88,11 +88,13 @@ def reg(t2_img, t2_aff, pdff_img, pdff_aff, use_affine, t2s_raw, t2s_aff, ps_raw
     disp = convex_adam_pt(fixed, moving)
     ps, _ = sitk_to_nib(ps_in)
     fov, _ = sitk_to_nib(fov_in)
+    mov_arr, _ = sitk_to_nib(moving)
+    warped_mov = warp_ras_with_disp(mov_arr, disp, order=1)   # warped PDFF image in T2 frame
     overlap = warp_ras_with_disp(fov, disp, order=0) > 0.5
     wseg = warp_ras_with_disp(ps, disp, order=0).astype(np.uint8)
     t2s, _ = sitk_to_nib(resample_to_fixed(fixed, nib_to_sitk(t2s_raw, t2s_aff), nn=True))
     fixed_r, faff = sitk_to_nib(fixed)
-    return fixed_r, faff, t2s.astype(np.uint8), wseg, overlap
+    return fixed_r, faff, t2s.astype(np.uint8), wseg, overlap, warped_mov
 
 
 def metrics(t2s, wseg, overlap):
@@ -119,10 +121,10 @@ def main():
     pdff_img, pdff_aff = pp_img(RAW / "pdff" / "BLA_0096_1.nii.gz")
 
     print("=== RAW (deformable only) ===")
-    fr, faff, t2s, wseg_raw, ov = reg(t2_img, t2_aff, pdff_img, pdff_aff, False, t2s_raw, t2s_aff, ps_raw, ps_aff)
+    fr, faff, t2s, wseg_raw, ov, _ = reg(t2_img, t2_aff, pdff_img, pdff_aff, False, t2s_raw, t2s_aff, ps_raw, ps_aff)
     mraw = metrics(t2s, wseg_raw, ov)
     print("=== AFFINE -> ConvexAdam ===")
-    fr, faff, t2s, wseg_aff, ov = reg(t2_img, t2_aff, pdff_img, pdff_aff, True, t2s_raw, t2s_aff, ps_raw, ps_aff)
+    fr, faff, t2s, wseg_aff, ov, warped_mov = reg(t2_img, t2_aff, pdff_img, pdff_aff, True, t2s_raw, t2s_aff, ps_raw, ps_aff)
     maff = metrics(t2s, wseg_aff, ov)
 
     # save warped segs (in T2 iso+crop frame)
@@ -142,43 +144,66 @@ def main():
         print(f"  {v:>3} ({n:>6}): RAW {d:.2f}/{p:.2f}/{r:.2f} | AFF {d2:.2f}/{p2:.2f}/{r2:.2f}")
     print(f"MEAN Dice RAW={np.nanmean([x[2] for x in mraw]):.3f}  AFF={np.nanmean([x[2] for x in maff]):.3f}")
 
-    # coverage montage (AFFINE-deformable): T2+true | T2+warped | overlay(G=true,R=warped)
+    # coverage montage: ~28 subsampled slices, 3 panels each:
+    #   [T2 + true seg] | [warped PDFF + warped seg] | [overlay G=true R=warped]
     import matplotlib
     matplotlib.use("Agg")
     import matplotlib.pyplot as plt
-    def nm(x): return (x - x.min()) / (x.max() - x.min() + 1e-8)
+    from imaging_utils import _remap_labels, _label_cmap
+
+    labs = sorted(set(np.unique(t2s).tolist()) | set(np.unique(wseg_aff).tolist()))
+    labs = [int(v) for v in labs if v != 0]
+    cmap = _label_cmap(len(labs))
+    vmax = len(labs)
+
+    def nm(x):
+        return (x - x.min()) / (x.max() - x.min() + 1e-8)
+
     Z = t2s.shape[2]
-    true_any = (t2s > 0).astype(np.float32)
-    warp_any = (wseg_aff > 0).astype(np.float32)
+    step = max(1, Z // 28)
+    zs = list(range(0, Z, step))[:28]
     cols = 7
-    rowsn = int(np.ceil(Z / cols))
-    fig, axs = plt.subplots(rowsn, 3 * cols, figsize=(3 * cols * 1.5, rowsn * 1.5))
+    rowsn = int(np.ceil(len(zs) / cols))
+    fig, axs = plt.subplots(rowsn, 3 * cols, figsize=(3 * cols * 1.5, rowsn * 1.6))
     axs = np.atleast_1d(axs).reshape(rowsn, 3 * cols)
-    for z in range(Z):
-        r, c = divmod(z, cols)
+    for i, z in enumerate(zs):
+        r, c = divmod(i, cols)
         c0 = 3 * c
-        img = nm(fr[:, :, z]).T
-        axs[r][c0].imshow(img, cmap="gray", origin="lower", aspect="equal")
-        axs[r][c0].imshow((t2s[:, :, z] > 0).T, cmap="gray", alpha=0.0)
-        axs[r][c0 + 1].imshow(img, cmap="gray", origin="lower", aspect="equal")
-        axs[r][c0 + 2].imshow(img, cmap="gray", origin="lower", aspect="equal")
-        ov = np.zeros((*true_any[:, :, z].shape, 3))
-        ov[..., 1] = true_any[:, :, z]   # G = true
-        ov[..., 0] = warp_any[:, :, z]   # R = warped
-        axs[r][c0 + 2].imshow(np.transpose(ov, (1, 0, 2)), origin="lower", aspect="equal")
-        if z == 0:
-            axs[r][c0].set_title("T2", fontsize=6); axs[r][c0 + 1].set_title("(slice)", fontsize=6)
+        img_t = nm(fr[:, :, z])
+        img_w = nm(warped_mov[:, :, z])
+        ts = _remap_labels(t2s[:, :, z], labs)
+        ws = _remap_labels(wseg_aff[:, :, z], labs)
+        # p0: T2 + true seg
+        ax = axs[r][c0]
+        ax.imshow(img_t.T, cmap="gray", origin="lower", aspect="equal")
+        ax.imshow(ts.T, cmap=cmap, vmin=0, vmax=vmax, origin="lower", aspect="equal", interpolation="nearest")
+        # p1: warped PDFF + warped seg
+        ax = axs[r][c0 + 1]
+        ax.imshow(img_w.T, cmap="gray", origin="lower", aspect="equal")
+        ax.imshow(ws.T, cmap=cmap, vmin=0, vmax=vmax, origin="lower", aspect="equal", interpolation="nearest")
+        # p2: overlay (G=T2 true, R=warped)
+        ax = axs[r][c0 + 2]
+        ax.imshow(img_t.T, cmap="gray", origin="lower", aspect="equal")
+        ov = np.zeros((*ts.shape, 3))
+        ov[..., 1] = (t2s[:, :, z] > 0).astype(float)
+        ov[..., 0] = (wseg_aff[:, :, z] > 0).astype(float)
+        ax.imshow(np.transpose(ov, (1, 0, 2)), origin="lower", aspect="equal")
+        if i == 0:
+            axs[r][c0].set_title("T2 + true seg", fontsize=6)
+            axs[r][c0 + 1].set_title("warped PDFF + warped seg", fontsize=6)
             axs[r][c0 + 2].set_title("G=true R=warped", fontsize=6)
         for k in range(3):
-            axs[r][c0 + k].set_xticks([]); axs[r][c0 + k].set_yticks([])
-    for z in range(Z, rowsn * cols):
-        r, c = divmod(z, cols)
+            axs[r][c0 + k].set_xticks([])
+            axs[r][c0 + k].set_yticks([])
+    for i in range(len(zs), rowsn * cols):
+        r, c = divmod(i, cols)
         for k in range(3):
             axs[r][3 * c + k].axis("off")
-    fig.suptitle("0096 affine->ConvexAdam: seg coverage (G=T2 true, R=warped PDFF, yellow=agree) - ALL axial slices", fontsize=10)
+    fig.suptitle("0096 affine->ConvexAdam: T2 + true seg | warped PDFF + warped seg | "
+                 "overlay (G=true R=warped yellow=agree)", fontsize=10)
     fig.tight_layout(rect=(0, 0, 1, 0.97))
     fig.savefig(HERE / "coverage_all_slices.png", dpi=80, bbox_inches="tight")
-    print("saved coverage_all_slices.png + warped segs + metrics")
+    print("saved coverage_all_slices.png (with warped PDFF) + warped segs + metrics")
 
 
 if __name__ == "__main__":
